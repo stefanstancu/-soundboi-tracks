@@ -11,11 +11,13 @@ from urllib.parse import parse_qs, quote, urlsplit
 from curl_cffi import requests
 
 from soundboi_tracks.config import (
-    beatport_download_dir,
     beatport_token_file,
+    library_incoming_dir,
+    library_staging_dir,
     orpheusdl_dir,
     write_private_text,
 )
+from soundboi_tracks.library.index import is_audio_file, move_files_to_library
 from soundboi_tracks.providers.bandcamp.search import BandcampSearchHit
 
 
@@ -42,6 +44,7 @@ class BeatportCredentials:
 class BeatportDownloadResult:
     track_id: int
     output_dir: Path
+    files: tuple[Path, ...] = ()
 
 
 class BeatportClient:
@@ -275,13 +278,14 @@ def search_beatport(query: str, limit: int = 15) -> list[BandcampSearchHit]:
 
 
 def download_beatport_track(track_id: int, output_dir: Path | None = None) -> BeatportDownloadResult:
-    output_dir = output_dir or beatport_download_dir()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    final_output_dir = output_dir or library_incoming_dir()
+    staging_dir = library_staging_dir() / f"beatport-{track_id}-{int(datetime.now().timestamp())}"
+    staging_dir.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
         "orpheus.py",
         "-o",
-        str(output_dir),
+        str(staging_dir),
         "download",
         "beatport",
         "track",
@@ -298,4 +302,16 @@ def download_beatport_track(track_id: int, output_dir: Path | None = None) -> Be
     if result.returncode != 0:
         message = (result.stderr or result.stdout or "Beatport download failed").strip()
         raise BeatportDownloadError(message[-1000:])
-    return BeatportDownloadResult(track_id=track_id, output_dir=output_dir)
+    new_files = [path for path in staging_dir.rglob("*") if is_audio_file(path)]
+    final_output_dir.mkdir(parents=True, exist_ok=True)
+    moved_files = move_files_to_library(new_files, final_output_dir)
+    try:
+        for leftover in sorted(staging_dir.rglob("*"), reverse=True):
+            if leftover.is_file():
+                leftover.unlink()
+            elif leftover.is_dir():
+                leftover.rmdir()
+        staging_dir.rmdir()
+    except OSError:
+        pass
+    return BeatportDownloadResult(track_id=track_id, output_dir=final_output_dir, files=tuple(moved_files))

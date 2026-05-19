@@ -29,6 +29,25 @@ def bandcamp_download_dir() -> Path:
     return Path.home() / "Music" / APP_NAME / "Bandcamp"
 
 
+def library_dir() -> Path:
+    base = os.environ.get("SOUNDBOI_LIBRARY_DIR")
+    if base:
+        return Path(base).expanduser()
+    return Path.home() / "Music" / APP_NAME / "downloads"
+
+
+def library_incoming_dir() -> Path:
+    return library_dir()
+
+
+def library_staging_dir() -> Path:
+    return library_dir().parent / ".staging"
+
+
+def library_index_file() -> Path:
+    return app_config_dir() / "library-index.sqlite3"
+
+
 def beatport_download_dir() -> Path:
     base = os.environ.get("SOUNDBOI_DOWNLOAD_DIR")
     if base:

@@ -38,7 +38,7 @@ source .venv/bin/activate
 soundboi-tracks tui
 ```
 
-The TUI has a Bandcamp login button. It opens a dedicated browser profile, waits for you to log in manually, captures the resulting Bandcamp session cookies, and stores them at `~/.config/soundboi-tracks/bandcamp.cookies`.
+The TUI has a thin provider bar showing Spotify, Bandcamp, and Beatport connection status. Login buttons appear in that bar only when a provider needs manual auth. Bandcamp auth opens a dedicated browser profile, waits for you to log in manually, captures the resulting session cookies, and stores them at `~/.config/soundboi-tracks/bandcamp.cookies`.
 
 The TUI includes combined search. Enter an artist/title query and press `Search` to query Bandcamp and Beatport concurrently, then combine the results.
 
@@ -50,13 +50,15 @@ Purchase/download flow:
 4. For Bandcamp, the app checks your collection. If you do not own the result yet, it opens the Bandcamp page for manual purchase.
 5. Close the Bandcamp browser after purchase. The app checks ownership again and downloads automatically if the purchase is detected.
 
-Bandcamp downloads default to `~/Music/soundboi-tracks/Bandcamp/Artist/Release/`. Beatport downloads default to `~/Music/soundboi-tracks/Beatport/` and are handled by your existing OrpheusDL setup. Set `SOUNDBOI_DOWNLOAD_DIR` to choose a different root; provider downloads will be placed under provider subfolders.
+Downloads are consolidated under `~/Music/soundboi-tracks/downloads/` regardless of provider. Bandcamp and Beatport source metadata is tracked in a local SQLite index at `~/.config/soundboi-tracks/library-index.sqlite3` plus sidecar files next to downloaded audio.
+
+The TUI indexes the local library in the background. Search results and Spotify playlist tracks are highlighted when they appear to already exist locally: `✓` means an exact provider/Spotify match, and `~` means a likely artist/title match. This is only an indicator; it does not prevent re-downloading.
 
 Beatport downloads run OrpheusDL with this project's active Python environment, so install the `orpheus` extra before using Beatport download support.
 
 ## Spotify
 
-Spotify playlist browsing requires a Spotify developer app client id. Add `http://127.0.0.1:8765/callback` as the app redirect URI, then set `SPOTIFY_CLIENT_ID` or write `~/.config/soundboi-tracks/spotify.json` with a `client_id`. The TUI logs in automatically on boot if needed, loads playlists, loads tracks when you click a playlist, and searches the selected track when you click it. See `docs/spotify.md`.
+Spotify playlist browsing requires a Spotify developer app client id. Add `http://127.0.0.1:8765/callback` as the app redirect URI, then set `SPOTIFY_CLIENT_ID` or write `~/.config/soundboi-tracks/spotify.json` with a `client_id`. The TUI loads playlists automatically when already authenticated, shows a provider-bar login button when needed, loads tracks when you click a playlist, and searches the selected track when you click it. See `docs/spotify.md`.
 
 You can smoke-test search without the TUI:
 

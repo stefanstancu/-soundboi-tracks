@@ -30,8 +30,8 @@ at `~/.config/soundboi-tracks/spotify.json`.
 ## TUI Flow
 
 1. Run `soundboi-tracks tui`.
-2. If no Spotify token is saved, approve the browser auth flow that opens automatically.
-3. Playlists load automatically after startup/login.
+2. If no Spotify token is saved, click `Login Spotify` in the provider bar and approve the browser auth flow.
+3. Playlists load automatically after startup or login.
 4. Click a playlist to load its tracks.
 5. Click a track to search Bandcamp and Beatport.
 

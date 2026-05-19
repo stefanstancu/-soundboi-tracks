@@ -141,6 +141,7 @@ class BandcampBrowserLogin:
 
 def open_bandcamp_page_and_wait_for_close(url: str, timeout_seconds: int = 900) -> BandcampAuthStatus:
     try:
+        from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise BandcampAuthError("Playwright is not installed. Run pip install -e .") from exc
@@ -168,9 +169,13 @@ def open_bandcamp_page_and_wait_for_close(url: str, timeout_seconds: int = 900) 
                 cookie_header = cookies_to_header(context.cookies())
                 if cookie_header:
                     last_cookie_header = cookie_header
+                page.wait_for_timeout(1000)
+            except PlaywrightError as exc:
+                if _is_playwright_closed_error(exc):
+                    break
+                raise
             except Exception:
                 break
-            page.wait_for_timeout(1000)
 
         try:
             cookie_header = cookies_to_header(context.cookies())
@@ -189,6 +194,13 @@ def open_bandcamp_page_and_wait_for_close(url: str, timeout_seconds: int = 900) 
         playwright.stop()
 
     return verify_cookie_header(last_cookie_header or None)
+
+
+def _is_playwright_closed_error(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    return "closed" in message and (
+        "target page" in message or "target context" in message or "target browser" in message
+    )
 
 
 def cookies_to_header(cookies: list[dict[str, Any]]) -> str:

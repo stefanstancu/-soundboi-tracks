@@ -27,6 +27,10 @@ Bandcamp ownership is checked lazily when downloading. The downloader loads the 
 
 Purchases stay manual: when a selected Bandcamp result is not already owned, the TUI opens the Bandcamp page and waits for the user to close the browser. After the page closes, the collection is refreshed and the result is downloaded automatically if ownership is detected. The Bandcamp downloader prefers `mp3-320`, then falls back through common lossless/high-quality formats. Beatport selected results are passed to OrpheusDL for download.
 
+## Local Library Index
+
+Downloaded audio is consolidated under `~/Music/soundboi-tracks/downloads/` independent of provider. A SQLite index in `~/.config/soundboi-tracks/library-index.sqlite3` stores provider ids, normalized artist/title keys, optional Spotify origin ids, and file stats. Startup loads the index immediately and refreshes it in the background with cheap path/mtime/size checks. Search and Spotify rows use the in-memory lookup maps to show exact or likely local matches without blocking re-downloads.
+
 ## Auth
 
 Bandcamp auth should use a browser-login flow that captures session cookies after the user signs in manually. The tool should not store account passwords.

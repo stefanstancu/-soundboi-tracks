@@ -12,7 +12,7 @@ from zipfile import BadZipFile, ZipFile, is_zipfile
 
 from bs4 import BeautifulSoup
 
-from soundboi_tracks.config import bandcamp_download_dir
+from soundboi_tracks.config import library_incoming_dir
 from soundboi_tracks.providers.bandcamp.auth import authenticated_session
 from soundboi_tracks.providers.bandcamp.collection import BandcampPurchase, load_collection
 from soundboi_tracks.providers.bandcamp.search import BandcampSearchHit
@@ -69,7 +69,7 @@ def download_purchase(
     download_url, actual_format = _select_download_url(page_data, purchase, preferred_format)
     download_url = _check_statdownload(session, download_url)
 
-    output_dir = _purchase_output_dir(output_root or bandcamp_download_dir(), purchase)
+    output_dir = _purchase_output_dir(output_root or library_incoming_dir(), purchase)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.NamedTemporaryFile(mode="w+b", delete=False, dir=output_dir) as temp_file:
@@ -200,9 +200,7 @@ def _materialize_download(
 
 
 def _purchase_output_dir(output_root: Path, purchase: BandcampPurchase) -> Path:
-    artist = safe_filename(purchase.artist or "Unknown Artist")
-    title = safe_filename(purchase.album or purchase.title or "Unknown Release")
-    return output_root / artist / title
+    return output_root
 
 
 def _extension_for_format(fmt: str) -> str:

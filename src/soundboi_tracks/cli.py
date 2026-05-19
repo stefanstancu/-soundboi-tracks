@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 
 from soundboi_tracks.config import (
-    bandcamp_download_dir,
-    beatport_download_dir,
+    library_dir,
+    library_index_file,
     spotify_config_file,
     spotify_token_file,
 )
@@ -37,8 +37,8 @@ def main() -> int:
         print("soundboi-tracks project is initialized")
         print(f"Bandcamp cookies: {status.cookie_path}")
         print(f"Bandcamp auth: {'ok' if status.authenticated else status.message}")
-        print(f"Bandcamp downloads: {bandcamp_download_dir()}")
-        print(f"Beatport downloads: {beatport_download_dir()}")
+        print(f"Downloads: {library_dir()}")
+        print(f"Library index: {library_index_file()}")
         print(f"Spotify config: {spotify_config_file()}")
         print(f"Spotify tokens: {spotify_token_file()}")
         return 0

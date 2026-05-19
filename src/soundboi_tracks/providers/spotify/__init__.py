@@ -1,0 +1,1 @@
+"""Spotify metadata provider."""

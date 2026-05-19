@@ -1,0 +1,19 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+
+# Local auth/session material. Do not commit cookies or credentials.
+config/*.cookies
+config/*.cookies.txt
+config/*.json
+config/*.env
+data/
+downloads/

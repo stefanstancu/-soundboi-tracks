@@ -6,6 +6,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qs, quote, urlsplit
 
 from curl_cffi import requests
@@ -277,7 +278,11 @@ def search_beatport(query: str, limit: int = 15) -> list[BandcampSearchHit]:
     return BeatportClient().search_tracks(query, limit=limit)
 
 
-def download_beatport_track(track_id: int, output_dir: Path | None = None) -> BeatportDownloadResult:
+def download_beatport_track(
+    track_id: int,
+    output_dir: Path | None = None,
+    log_callback: Callable[[str], None] | None = None,
+) -> BeatportDownloadResult:
     final_output_dir = output_dir or library_incoming_dir()
     staging_dir = library_staging_dir() / f"beatport-{track_id}-{int(datetime.now().timestamp())}"
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -291,16 +296,30 @@ def download_beatport_track(track_id: int, output_dir: Path | None = None) -> Be
         "track",
         str(track_id),
     ]
-    result = subprocess.run(
+    process = subprocess.Popen(
         command,
         cwd=orpheusdl_dir(),
-        check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        timeout=600,
+        bufsize=1,
     )
-    if result.returncode != 0:
-        message = (result.stderr or result.stdout or "Beatport download failed").strip()
+    output_lines: list[str] = []
+    try:
+        if process.stdout:
+            for line in process.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                output_lines.append(line)
+                if log_callback:
+                    log_callback(line)
+        return_code = process.wait(timeout=600)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        raise BeatportDownloadError("Beatport download timed out") from exc
+    if return_code != 0:
+        message = "\n".join(output_lines[-20:]) or "Beatport download failed"
         raise BeatportDownloadError(message[-1000:])
     new_files = [path for path in staging_dir.rglob("*") if is_audio_file(path)]
     final_output_dir.mkdir(parents=True, exist_ok=True)

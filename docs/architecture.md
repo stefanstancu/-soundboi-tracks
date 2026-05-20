@@ -31,6 +31,10 @@ Purchases stay manual: when a selected Bandcamp result is not already owned, the
 
 Downloaded audio is consolidated under `~/Music/soundboi-tracks/downloads/` independent of provider. A SQLite index in `~/.config/soundboi-tracks/library-index.sqlite3` stores provider ids, normalized artist/title keys, optional Spotify origin ids, and file stats. Startup loads the index immediately and refreshes it in the background with cheap path/mtime/size checks. Search and Spotify rows use the in-memory lookup maps to show exact or likely local matches without blocking re-downloads.
 
+## Queue
+
+The download queue is persisted in the same SQLite database. Search results can be queued with optional Spotify origin metadata, and queued state is reflected back into search and Spotify tables. `Download All` processes pending items sequentially; Bandcamp items that still require purchase remain pending instead of launching the purchase flow.
+
 ## Auth
 
 Bandcamp auth should use a browser-login flow that captures session cookies after the user signs in manually. The tool should not store account passwords.

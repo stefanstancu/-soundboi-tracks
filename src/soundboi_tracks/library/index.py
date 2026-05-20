@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -53,7 +54,7 @@ class LibraryIndex:
         self.refresh_memory()
 
     def _connect(self) -> None:
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tracks (
@@ -79,12 +80,13 @@ class LibraryIndex:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_provider_key ON tracks(provider_key)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_spotify ON tracks(spotify_track_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_artist_title ON tracks(artist_title_key)")
+            conn.commit()
 
     def refresh_memory(self) -> None:
         provider_keys: dict[str, Path] = {}
         spotify_keys: dict[str, Path] = {}
         artist_title_keys: dict[str, Path] = {}
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             for row in conn.execute(
                 "SELECT path, provider_key, spotify_track_id, artist_title_key FROM tracks"
             ):
@@ -101,7 +103,7 @@ class LibraryIndex:
 
     def scan(self, roots: Iterable[Path] | None = None) -> None:
         roots = tuple(roots or (library_incoming_dir(),))
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             for root in roots:
                 if not root.exists():
                     continue
@@ -120,6 +122,7 @@ class LibraryIndex:
             for path in existing:
                 if not Path(path).exists():
                     conn.execute("DELETE FROM tracks WHERE path = ?", (path,))
+            conn.commit()
         self.refresh_memory()
 
     def record_download(
@@ -130,8 +133,9 @@ class LibraryIndex:
     ) -> None:
         metadata = metadata_from_hit(hit, origin)
         stat = file_path.stat()
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             self._upsert(conn, file_path, stat.st_size, stat.st_mtime_ns, metadata)
+            conn.commit()
         self.refresh_memory()
 
     def match_hit(self, hit: BandcampSearchHit) -> LocalMatch:

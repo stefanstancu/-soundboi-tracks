@@ -54,6 +54,8 @@ Downloads are consolidated under `~/Music/soundboi-tracks/downloads/` regardless
 
 The TUI indexes the local library in the background. Search results and Spotify playlist tracks are highlighted when they appear to already exist locally: `✓` means an exact provider/Spotify match, and `~` means a likely artist/title match. This is only an indicator; it does not prevent re-downloading.
 
+Search results can also be added to a persistent queue stored in the SQLite index. Queue states use compact markers: `○` pending, animated spinner while downloading, `✓` completed, and `!` failed. `Download All` skips unpurchased Bandcamp items for now and leaves them pending.
+
 Beatport downloads run OrpheusDL with this project's active Python environment, so install the `orpheus` extra before using Beatport download support.
 
 ## Spotify

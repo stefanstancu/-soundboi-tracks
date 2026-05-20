@@ -6,6 +6,7 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
+from textual.coordinate import Coordinate
 from textual.widgets import Button, DataTable, Footer, Input, LoadingIndicator, RichLog, Static
 
 from soundboi_tracks.providers.bandcamp.auth import (
@@ -22,7 +23,17 @@ from soundboi_tracks.providers.bandcamp.download import (
     BandcampDownloadError,
     download_purchase,
 )
-from soundboi_tracks.library.index import LibraryIndex, SearchOrigin
+from soundboi_tracks.library.index import LibraryIndex, SearchOrigin, make_artist_title_key
+from soundboi_tracks.library.queue import (
+    COMPLETED,
+    DOWNLOADING,
+    FAILED,
+    NEEDS_PURCHASE,
+    PENDING,
+    QueueItem,
+    QueueStore,
+    queue_id_for_hit,
+)
 from soundboi_tracks.providers.bandcamp.search import BandcampSearchHit
 from soundboi_tracks.providers.beatport.search import (
     BeatportDownloadError,
@@ -156,6 +167,24 @@ class SoundboiTracksApp(App[None]):
     }
 
     #spotify-content {
+        height: 2fr;
+    }
+
+    #queue-pane {
+        height: 1fr;
+        margin-top: 1;
+    }
+
+    #queue-nav {
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    #queue-title {
+        width: 1fr;
+    }
+
+    #queue-table {
         height: 1fr;
     }
 
@@ -184,6 +213,10 @@ class SoundboiTracksApp(App[None]):
     }
 
     #results {
+        height: 1fr;
+    }
+
+    #search-content {
         height: 2fr;
     }
 
@@ -205,18 +238,6 @@ class SoundboiTracksApp(App[None]):
         height: 1fr;
     }
 
-    #download-status {
-        height: auto;
-        margin-bottom: 1;
-        padding: 0 1;
-        border: round $warning;
-        display: none;
-    }
-
-    #download-status-text {
-        width: 1fr;
-        padding-left: 1;
-    }
     """
 
     BINDINGS = [("q", "quit", "Quit")]
@@ -231,6 +252,13 @@ class SoundboiTracksApp(App[None]):
         self._hide_local_spotify_tracks = False
         self._current_playlist: SpotifyPlaylist | None = None
         self._library_index = LibraryIndex()
+        self._queue_store = QueueStore()
+        self._queue_items: list[QueueItem] = []
+        self._queue_row_by_id: dict[str, int] = {}
+        self._queue_status_by_hit: dict[str, str] = {}
+        self._queue_status_by_spotify_id: dict[str, str] = {}
+        self._queue_animation_timer = None
+        self._queue_animation_frame = 0
         self._current_search_origin: SearchOrigin | None = None
         self._current_search_query = ""
         self._startup_complete = False
@@ -270,18 +298,23 @@ class SoundboiTracksApp(App[None]):
                             with Vertical(id="spotify-loading", classes="table-loading"):
                                 yield LoadingIndicator()
                                 yield Static("Loading...", id="spotify-loading-text", classes="table-loading-text")
+                        with Vertical(id="queue-pane"):
+                            with Horizontal(id="queue-nav"):
+                                yield Static("Queue", id="queue-title")
+                                yield Button("Clear Queue", id="queue-clear")
+                                yield Button("Download All", id="queue-download-all", variant="warning")
+                            yield DataTable(id="queue-table")
                     with Vertical(id="search-pane"):
                         with Horizontal(id="search-row"):
                             yield Input(placeholder="Search: artist track", id="search-input")
                             yield Button("Search", id="search", variant="success")
+                            yield Button("Add to Queue", id="add-to-queue")
                             yield Button("Download Selected", id="download-selected", variant="warning")
-                        yield DataTable(id="results")
-                        with Vertical(id="search-loading", classes="table-loading"):
-                            yield LoadingIndicator()
-                            yield Static("Loading...", id="search-loading-text", classes="table-loading-text")
-                        with Horizontal(id="download-status"):
-                            yield LoadingIndicator(id="download-spinner")
-                            yield Static("Idle", id="download-status-text")
+                        with Vertical(id="search-content"):
+                            yield DataTable(id="results")
+                            with Vertical(id="search-loading", classes="table-loading"):
+                                yield LoadingIndicator()
+                                yield Static("Loading...", id="search-loading-text", classes="table-loading-text")
                         yield RichLog(id="log", wrap=True, highlight=True)
         yield Footer()
 
@@ -413,6 +446,14 @@ class SoundboiTracksApp(App[None]):
         self.query_one("#spotify-back", Button).display = False
         self.query_one("#spotify-local-toggle", Button).display = False
 
+        queue = self.query_one("#queue-table", DataTable)
+        queue.cursor_type = "row"
+        queue.add_column("S", width=2)
+        queue.add_column("Source", width=9)
+        queue.add_column("Track", width=28)
+        queue.add_column("Artist", width=20)
+        self._render_queue()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "bandcamp-login":
             self.query_one("#bandcamp-login", Button).disabled = True
@@ -426,12 +467,18 @@ class SoundboiTracksApp(App[None]):
             self.run_worker(self._spotify_login_worker, thread=True)
         elif event.button.id == "search":
             self._start_search()
+        elif event.button.id == "add-to-queue":
+            self._add_selected_to_queue()
         elif event.button.id == "download-selected":
             self._download_selected()
         elif event.button.id == "spotify-back":
             self._show_spotify_playlists()
         elif event.button.id == "spotify-local-toggle":
             self._toggle_spotify_local_visibility()
+        elif event.button.id == "queue-download-all":
+            self._download_queue()
+        elif event.button.id == "queue-clear":
+            self._clear_queue()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "search-input":
@@ -439,6 +486,8 @@ class SoundboiTracksApp(App[None]):
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id != "spotify-browser":
+            if event.data_table.id == "queue-table":
+                self._handle_queue_row_selected()
             return
         if self._spotify_mode == "playlists":
             self._load_selected_spotify_playlist_tracks()
@@ -651,6 +700,85 @@ class SoundboiTracksApp(App[None]):
             return None
         return self._visible_spotify_tracks[row]
 
+    def _add_selected_to_queue(self) -> None:
+        hit = self._selected_hit()
+        if not hit:
+            return
+        item = self._queue_store.add(hit, origin=self._valid_search_origin())
+        self._log(f"Queued {item.hit.source}: {item.hit.artist} - {item.hit.name}")
+        self._render_queue()
+        self._refresh_search_indicators()
+        if self._queue_item_affects_visible_spotify(item):
+            self._refresh_spotify_indicators()
+        if hit.source == "bandcamp":
+            self.run_worker(lambda: self._check_queued_bandcamp_ownership(item), thread=True)
+
+    def _check_queued_bandcamp_ownership(self, item: QueueItem) -> None:
+        try:
+            collection = load_collection()
+            purchase, _match_type = collection.find_purchase_for_hit(item.hit)
+        except Exception as exc:
+            self.call_from_thread(self._log, f"Could not check Bandcamp ownership: {exc}")
+            return
+        if purchase:
+            self._queue_store.update_status(item.queue_id, PENDING)
+        else:
+            self._queue_store.update_status(item.queue_id, NEEDS_PURCHASE, "purchase required")
+        self.call_from_thread(self._render_queue)
+        self.call_from_thread(self._refresh_queue_indicators_for_item, item)
+
+    def _handle_queue_row_selected(self) -> None:
+        table = self.query_one("#queue-table", DataTable)
+        row = table.cursor_row
+        if row is None or row < 0 or row >= len(self._queue_items):
+            return
+        item = self._queue_items[row]
+        if item.status != NEEDS_PURCHASE or item.hit.source != "bandcamp":
+            return
+        self._log(f"Opening Bandcamp purchase page for queued item: {item.hit.artist} - {item.hit.name}")
+        self.run_worker(lambda: self._purchase_queued_bandcamp_item(item), thread=True)
+
+    def _purchase_queued_bandcamp_item(self, item: QueueItem) -> None:
+        try:
+            if not item.hit.url:
+                raise BandcampDownloadError("Bandcamp result has no purchase page URL")
+            open_bandcamp_page_and_wait_for_close(item.hit.url)
+            collection = load_collection()
+            purchase, _match_type = collection.find_purchase_for_hit(item.hit)
+        except Exception as exc:
+            self.call_from_thread(self._log, f"Bandcamp purchase check failed: {exc}")
+            return
+        if purchase:
+            self._queue_store.update_status(item.queue_id, PENDING)
+            self.call_from_thread(self._log, f"Purchase detected; queued item is pending: {item.hit.name}")
+        else:
+            self._queue_store.update_status(item.queue_id, NEEDS_PURCHASE, "purchase required")
+            self.call_from_thread(self._log, f"Purchase not detected; item still needs purchase: {item.hit.name}")
+        self.call_from_thread(self._render_queue)
+        self.call_from_thread(self._refresh_queue_indicators_for_item, item)
+
+    def _download_queue(self) -> None:
+        pending = self._queue_store.pending()
+        if not pending:
+            self._log("Queue has no pending items.")
+            return
+        self.query_one("#queue-download-all", Button).disabled = True
+        self.query_one("#queue-clear", Button).disabled = True
+        self.run_worker(self._download_queue_worker, thread=True)
+
+    def _clear_queue(self) -> None:
+        if any(item.status == DOWNLOADING for item in self._queue_items):
+            self._log("Queue is downloading; wait until it finishes before clearing.")
+            return
+        self._queue_store.clear()
+        self._queue_items = []
+        self._queue_row_by_id = {}
+        self._refresh_queue_status_cache()
+        self._stop_queue_animation_if_idle()
+        self._render_queue()
+        self._refresh_local_indicators()
+        self._log("Queue cleared.")
+
     def _download_selected(self) -> None:
         hit = self._selected_hit()
         if not hit:
@@ -661,7 +789,6 @@ class SoundboiTracksApp(App[None]):
             if hit.artist
             else f"Preparing {hit.source}: {hit.name}"
         )
-        self._show_download_status(message)
         self._log(message)
         origin = self._valid_search_origin()
         self.run_worker(lambda: self._download_worker(hit, origin), thread=True)
@@ -710,7 +837,70 @@ class SoundboiTracksApp(App[None]):
             self.call_from_thread(self._log, message)
         finally:
             self.call_from_thread(self._enable_download_button)
-            self.call_from_thread(self._hide_download_status)
+
+    def _download_queue_worker(self) -> None:
+        try:
+            pending_items = self._queue_store.pending()
+            total = len(pending_items)
+            for index, item in enumerate(pending_items, start=1):
+                label = f"{item.hit.artist} - {item.hit.name}" if item.hit.artist else item.hit.name
+                self.call_from_thread(self._log, f"Starting queued download {index}/{total}: {label}")
+                self._queue_store.update_status(item.queue_id, DOWNLOADING)
+                self.call_from_thread(self._render_queue)
+                self.call_from_thread(self._refresh_search_indicators)
+                self.call_from_thread(self._start_queue_animation)
+
+                try:
+                    files = self._download_queue_item(item)
+                except BandcampDownloadError as exc:
+                    if str(exc) == "purchase required":
+                        self._queue_store.update_status(item.queue_id, NEEDS_PURCHASE, "purchase required")
+                        self.call_from_thread(
+                            self._log,
+                            f"Bandcamp purchase required: {item.hit.artist} - {item.hit.name}",
+                        )
+                        self.call_from_thread(self._refresh_queue_indicators_for_item, item)
+                    else:
+                        self._queue_store.update_status(item.queue_id, FAILED, str(exc)[-500:])
+                        self.call_from_thread(self._log, f"Queue download failed: {exc}")
+                        self.call_from_thread(self._refresh_queue_indicators_for_item, item)
+                except BeatportDownloadError as exc:
+                    self._queue_store.update_status(item.queue_id, FAILED, str(exc)[-500:])
+                    self.call_from_thread(self._log, f"Queue download failed: {exc}")
+                    self.call_from_thread(self._refresh_queue_indicators_for_item, item)
+                except Exception as exc:
+                    self._queue_store.update_status(item.queue_id, FAILED, str(exc)[-500:])
+                    self.call_from_thread(self._log, f"Unexpected queue download error: {exc}")
+                    self.call_from_thread(self._refresh_queue_indicators_for_item, item)
+                else:
+                    for file_path in files:
+                        self._library_index.record_download(file_path, item.hit, origin=item.origin)
+                    self._queue_store.update_status(item.queue_id, COMPLETED)
+                    self.call_from_thread(
+                        self._log,
+                        f"Completed queued download: {item.hit.artist} - {item.hit.name}",
+                    )
+                    self.call_from_thread(self._refresh_queue_indicators_for_item, item, True)
+                finally:
+                    self.call_from_thread(self._render_queue)
+        finally:
+            self.call_from_thread(self._stop_queue_animation_if_idle)
+            self.call_from_thread(lambda: setattr(self.query_one("#queue-download-all", Button), "disabled", False))
+            self.call_from_thread(lambda: setattr(self.query_one("#queue-clear", Button), "disabled", False))
+
+    def _download_queue_item(self, item: QueueItem) -> tuple[Path, ...]:
+        hit = item.hit
+        if hit.source == "bandcamp":
+            collection = load_collection()
+            purchase, _match_type = collection.find_purchase_for_hit(hit)
+            if not purchase:
+                raise BandcampDownloadError("purchase required")
+            result = download_purchase(purchase)
+            return result.files
+        if hit.source == "beatport" and hit.item_id is not None:
+            result = download_beatport_track(hit.item_id)
+            return result.files
+        raise BandcampDownloadError(f"Download is not supported for {hit.source}")
 
     def _record_downloaded_files(
         self, hit: BandcampSearchHit, files: tuple[Path, ...], origin: SearchOrigin | None
@@ -728,20 +918,14 @@ class SoundboiTracksApp(App[None]):
     def _download_bandcamp_with_purchase_flow(
         self, hit: BandcampSearchHit
     ) -> BandcampDownloadResult | None:
-        self.call_from_thread(self._show_download_status, "Checking Bandcamp purchases...")
         collection = load_collection()
         purchase, match_type = collection.find_purchase_for_hit(hit)
 
         if not purchase:
             if not hit.url:
                 raise BandcampDownloadError("Bandcamp result has no purchase page URL")
-            self.call_from_thread(
-                self._show_download_status,
-                "Opening Bandcamp purchase page. Close the browser when finished.",
-            )
             self.call_from_thread(self._log, f"Opening Bandcamp purchase page: {hit.url}")
             open_bandcamp_page_and_wait_for_close(hit.url)
-            self.call_from_thread(self._show_download_status, "Checking Bandcamp purchases again...")
             collection = load_collection()
             purchase, match_type = collection.find_purchase_for_hit(hit)
 
@@ -752,19 +936,10 @@ class SoundboiTracksApp(App[None]):
                 f"Matched purchase by {match_type}, but Bandcamp did not provide a redownload URL"
             )
 
-        self.call_from_thread(self._show_download_status, "Downloading Bandcamp purchase...")
         return download_purchase(purchase)
 
     def _enable_download_button(self) -> None:
         self.query_one("#download-selected", Button).disabled = False
-
-    def _show_download_status(self, message: str) -> None:
-        self.query_one("#download-status", Horizontal).display = True
-        self.query_one("#download-status-text", Static).update(message)
-
-    def _hide_download_status(self) -> None:
-        self.query_one("#download-status-text", Static).update("Idle")
-        self.query_one("#download-status", Horizontal).display = False
 
     def _show_table_loading(
         self,
@@ -787,15 +962,78 @@ class SoundboiTracksApp(App[None]):
     def _hide_search_loading(self) -> None:
         self._hide_table_loading("#search-loading", "#results")
 
+    def _render_queue(self) -> None:
+        self._queue_items = self._queue_store.list()
+        self._refresh_queue_status_cache()
+        self._queue_row_by_id = {}
+        table = self.query_one("#queue-table", DataTable)
+        table.clear()
+        for row_index, item in enumerate(self._queue_items):
+            self._queue_row_by_id[item.queue_id] = row_index
+            table.add_row(
+                self._queue_marker(item.status),
+                item.hit.source,
+                item.hit.name,
+                item.hit.artist,
+            )
+        self._stop_queue_animation_if_idle()
+
+    def _refresh_queue_status_cache(self) -> None:
+        self._queue_status_by_hit = {item.queue_id: item.status for item in self._queue_items}
+        spotify_status: dict[str, str] = {}
+        for item in self._queue_items:
+            spotify_track_id = item.origin.spotify_track_id if item.origin else None
+            if spotify_track_id:
+                spotify_status[spotify_track_id] = item.status
+        self._queue_status_by_spotify_id = spotify_status
+
+    def _queue_marker(self, status: str | None) -> Text | str:
+        if status == DOWNLOADING:
+            frame = self.SPLASH_SPINNER_FRAMES[
+                self._queue_animation_frame % len(self.SPLASH_SPINNER_FRAMES)
+            ]
+            return Text(frame, style="cyan")
+        if status == COMPLETED:
+            return Text("✓", style="green")
+        if status == FAILED:
+            return Text("!", style="red")
+        if status == NEEDS_PURCHASE:
+            return Text("$", style="yellow")
+        if status == PENDING:
+            return "○"
+        return ""
+
+    def _start_queue_animation(self) -> None:
+        if self._queue_animation_timer is None:
+            self._queue_animation_timer = self.set_interval(0.12, self._tick_queue_animation)
+
+    def _tick_queue_animation(self) -> None:
+        self._queue_animation_frame += 1
+        table = self.query_one("#queue-table", DataTable)
+        for item in self._queue_items:
+            if item.status != DOWNLOADING:
+                continue
+            row = self._queue_row_by_id.get(item.queue_id)
+            if row is None or row >= table.row_count:
+                continue
+            table.update_cell_at(Coordinate(row, 0), self._queue_marker(DOWNLOADING))
+
+    def _stop_queue_animation_if_idle(self) -> None:
+        if any(item.status == DOWNLOADING for item in self._queue_items):
+            return
+        if self._queue_animation_timer is not None:
+            self._queue_animation_timer.stop()
+            self._queue_animation_timer = None
+
     def _render_results(self, hits: list[BandcampSearchHit]) -> None:
         self._hits = hits
         table = self.query_one("#results", DataTable)
         table.clear()
         for hit in hits:
-            match = self._library_index.match_hit(hit)
+            marker = self._marker_for_hit(hit)
             table.add_row(
                 str(hit.rank),
-                self._local_marker(match.label),
+                marker,
                 hit.source,
                 hit.result_type,
                 hit.name,
@@ -854,20 +1092,60 @@ class SoundboiTracksApp(App[None]):
         table.add_column("Artist", width=24)
         table.add_column("Album", width=26)
         for index, track in enumerate(self._visible_spotify_tracks, start=1):
-            match = self._library_index.match_spotify_track(track)
+            marker = self._marker_for_spotify_track(track)
             table.add_row(
                 str(index),
-                self._local_marker(match.label),
+                marker,
                 track.name,
                 track.artist_label,
                 track.album,
             )
 
     def _refresh_local_indicators(self) -> None:
+        self._refresh_search_indicators()
+        self._refresh_spotify_indicators()
+
+    def _refresh_search_indicators(self) -> None:
         if self._hits:
             self._render_results(self._hits)
+
+    def _refresh_spotify_indicators(self) -> None:
         if self._spotify_mode == "tracks" and self._spotify_tracks:
-            self._render_spotify_tracks(self._spotify_tracks)
+            self._render_spotify_tracks_preserving_view()
+
+    def _refresh_queue_indicators_for_item(
+        self, item: QueueItem, force_spotify: bool = False
+    ) -> None:
+        self._refresh_search_indicators()
+        if force_spotify or self._queue_item_affects_visible_spotify(item):
+            self._refresh_spotify_indicators()
+
+    def _queue_item_affects_visible_spotify(self, item: QueueItem) -> bool:
+        spotify_track_id = item.origin.spotify_track_id if item.origin else None
+        if self._spotify_mode != "tracks":
+            return False
+        if spotify_track_id and any(
+            track.track_id == spotify_track_id for track in self._visible_spotify_tracks
+        ):
+            return True
+        hit_key = make_artist_title_key(item.hit.artist, item.hit.name)
+        if not hit_key:
+            return False
+        for track in self._visible_spotify_tracks:
+            artist = track.artists[0] if track.artists else ""
+            if make_artist_title_key(artist, track.name) == hit_key:
+                return True
+        return False
+
+    def _render_spotify_tracks_preserving_view(self) -> None:
+        table = self.query_one("#spotify-browser", DataTable)
+        cursor_row = table.cursor_row
+        scroll_x = table.scroll_x
+        scroll_y = table.scroll_y
+        self._render_spotify_tracks(self._spotify_tracks)
+        if table.row_count:
+            table.move_cursor(row=min(cursor_row, table.row_count - 1), animate=False, scroll=False)
+        table.set_scroll(scroll_x, scroll_y)
 
     def _toggle_spotify_local_visibility(self) -> None:
         self._hide_local_spotify_tracks = not self._hide_local_spotify_tracks
@@ -884,6 +1162,22 @@ class SoundboiTracksApp(App[None]):
         if label == "~":
             return Text(label, style="yellow")
         return label
+
+    def _marker_for_hit(self, hit: BandcampSearchHit) -> Text | str:
+        status = self._queue_status_by_hit.get(queue_id_for_hit(hit))
+        if status in {PENDING, NEEDS_PURCHASE, DOWNLOADING, FAILED}:
+            return self._queue_marker(status)
+        if status == COMPLETED:
+            return self._queue_marker(COMPLETED)
+        return self._local_marker(self._library_index.match_hit(hit).label)
+
+    def _marker_for_spotify_track(self, track: SpotifyTrack) -> Text | str:
+        status = self._queue_status_by_spotify_id.get(track.track_id)
+        if status in {PENDING, NEEDS_PURCHASE, DOWNLOADING, FAILED}:
+            return self._queue_marker(status)
+        if status == COMPLETED:
+            return self._queue_marker(COMPLETED)
+        return self._local_marker(self._library_index.match_spotify_track(track).label)
 
     def _render_status(self, status: BandcampAuthStatus) -> None:
         if status.authenticated:

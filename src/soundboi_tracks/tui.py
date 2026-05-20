@@ -155,6 +155,10 @@ class SoundboiTracksApp(App[None]):
         width: 1fr;
     }
 
+    #spotify-content {
+        height: 1fr;
+    }
+
     #search-row {
         height: auto;
         margin-bottom: 1;
@@ -222,7 +226,9 @@ class SoundboiTracksApp(App[None]):
         self._hits: list[BandcampSearchHit] = []
         self._playlists: list[SpotifyPlaylist] = []
         self._spotify_tracks: list[SpotifyTrack] = []
+        self._visible_spotify_tracks: list[SpotifyTrack] = []
         self._spotify_mode = "playlists"
+        self._hide_local_spotify_tracks = False
         self._current_playlist: SpotifyPlaylist | None = None
         self._library_index = LibraryIndex()
         self._current_search_origin: SearchOrigin | None = None
@@ -258,10 +264,12 @@ class SoundboiTracksApp(App[None]):
                         with Horizontal(id="spotify-nav"):
                             yield Static("Spotify Playlists", id="spotify-title")
                             yield Button("Back", id="spotify-back")
-                        yield DataTable(id="spotify-browser")
-                        with Vertical(id="spotify-loading", classes="table-loading"):
-                            yield LoadingIndicator()
-                            yield Static("Loading...", id="spotify-loading-text", classes="table-loading-text")
+                            yield Button("Hide Local", id="spotify-local-toggle")
+                        with Vertical(id="spotify-content"):
+                            yield DataTable(id="spotify-browser")
+                            with Vertical(id="spotify-loading", classes="table-loading"):
+                                yield LoadingIndicator()
+                                yield Static("Loading...", id="spotify-loading-text", classes="table-loading-text")
                     with Vertical(id="search-pane"):
                         with Horizontal(id="search-row"):
                             yield Input(placeholder="Search: artist track", id="search-input")
@@ -282,15 +290,72 @@ class SoundboiTracksApp(App[None]):
         self._setup_tables()
         self._render_all_provider_states()
         self._start_splash_spinner()
-        self.set_timer(0.1, self._run_startup_checks)
+        self.run_worker(self._run_startup_checks_worker, thread=True)
 
-    def _run_startup_checks(self) -> None:
-        self._log("Welcome. Spotify is on the left; combined Bandcamp/Beatport search is on the right.")
-        self._log("Click a Spotify playlist to load tracks; click a track to search the other backends.")
-        self.run_worker(self._scan_library_worker, thread=True)
-        self._check_auth()
-        self._check_beatport_status()
-        self._bootstrap_spotify()
+    def _run_startup_checks_worker(self) -> None:
+        self.call_from_thread(
+            self._log,
+            "Welcome. Spotify is on the left; combined Bandcamp/Beatport search is on the right.",
+        )
+        self.call_from_thread(
+            self._log,
+            "Click a Spotify playlist to load tracks; click a track to search the other backends.",
+        )
+        self._scan_library_for_startup()
+        self._check_auth_for_startup()
+        self._check_beatport_for_startup()
+        self._bootstrap_spotify_for_startup()
+
+    def _scan_library_for_startup(self) -> None:
+        try:
+            self._library_index.scan()
+        except Exception as exc:
+            self.call_from_thread(self._log, f"Library index scan failed: {exc}")
+        else:
+            self.call_from_thread(self._log, "Library index ready.")
+            self.call_from_thread(self._refresh_local_indicators)
+
+    def _check_auth_for_startup(self) -> None:
+        self.call_from_thread(self._set_splash_status, "checking Bandcamp")
+        status = verify_cookie_header()
+        self.call_from_thread(self._render_status, status)
+
+    def _check_beatport_for_startup(self) -> None:
+        self.call_from_thread(self._set_splash_status, "checking Beatport")
+        try:
+            load_beatport_credentials()
+        except BeatportSearchError as exc:
+            self.call_from_thread(
+                self._set_provider_status,
+                "beatport",
+                "Beatport Needs Config",
+                "error",
+            )
+            self.call_from_thread(self._log, f"Beatport unavailable: {exc}")
+        else:
+            self.call_from_thread(self._set_provider_status, "beatport", "Beatport Ready", "ok")
+
+    def _bootstrap_spotify_for_startup(self) -> None:
+        if load_token():
+            self.call_from_thread(self._set_splash_status, "loading Spotify playlists")
+            self.call_from_thread(self._set_provider_status, "spotify", "Spotify Loading", "checking")
+            self.call_from_thread(self._log, "Loading Spotify playlists from saved auth...")
+            self._load_spotify_playlists_worker()
+            return
+        self.call_from_thread(self._set_splash_status, "Spotify login needed")
+        self.call_from_thread(
+            self._set_provider_status,
+            "spotify",
+            "Spotify Needs Login",
+            "warn",
+            True,
+        )
+        self.call_from_thread(self._log, "No saved Spotify auth found. Use Login Spotify in the provider bar.")
+        self.call_from_thread(self._mark_startup_complete)
+
+    def _set_splash_status(self, status: str) -> None:
+        if not self._splash_finished:
+            self.query_one("#splash-status", Static).update(status)
 
     def _scan_library_worker(self) -> None:
         try:
@@ -346,6 +411,7 @@ class SoundboiTracksApp(App[None]):
         browser = self.query_one("#spotify-browser", DataTable)
         browser.cursor_type = "row"
         self.query_one("#spotify-back", Button).display = False
+        self.query_one("#spotify-local-toggle", Button).display = False
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "bandcamp-login":
@@ -364,6 +430,8 @@ class SoundboiTracksApp(App[None]):
             self._download_selected()
         elif event.button.id == "spotify-back":
             self._show_spotify_playlists()
+        elif event.button.id == "spotify-local-toggle":
+            self._toggle_spotify_local_visibility()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "search-input":
@@ -578,10 +646,10 @@ class SoundboiTracksApp(App[None]):
     def _selected_spotify_track(self) -> SpotifyTrack | None:
         table = self.query_one("#spotify-browser", DataTable)
         row = table.cursor_row
-        if row is None or row < 0 or row >= len(self._spotify_tracks):
+        if row is None or row < 0 or row >= len(self._visible_spotify_tracks):
             self._log("Select a Spotify track first.")
             return None
-        return self._spotify_tracks[row]
+        return self._visible_spotify_tracks[row]
 
     def _download_selected(self) -> None:
         hit = self._selected_hit()
@@ -744,9 +812,11 @@ class SoundboiTracksApp(App[None]):
         self._spotify_mode = "playlists"
         self._current_playlist = None
         self._spotify_tracks = []
+        self._visible_spotify_tracks = []
         self._hide_spotify_loading()
         self.query_one("#spotify-title", Static).update("Spotify Playlists")
         self.query_one("#spotify-back", Button).display = False
+        self.query_one("#spotify-local-toggle", Button).display = False
         table = self.query_one("#spotify-browser", DataTable)
         table.clear()
         table.clear(columns=True)
@@ -766,11 +836,15 @@ class SoundboiTracksApp(App[None]):
 
     def _render_spotify_tracks(self, tracks: list[SpotifyTrack]) -> None:
         self._spotify_tracks = tracks
+        self._visible_spotify_tracks = self._filtered_spotify_tracks(tracks)
         self._spotify_mode = "tracks"
         self._hide_spotify_loading()
         playlist_name = self._current_playlist.name if self._current_playlist else "Playlist"
         self.query_one("#spotify-title", Static).update(f"Spotify: {playlist_name}")
         self.query_one("#spotify-back", Button).display = True
+        toggle = self.query_one("#spotify-local-toggle", Button)
+        toggle.display = True
+        toggle.label = "Show Local" if self._hide_local_spotify_tracks else "Hide Local"
         table = self.query_one("#spotify-browser", DataTable)
         table.clear()
         table.clear(columns=True)
@@ -779,7 +853,7 @@ class SoundboiTracksApp(App[None]):
         table.add_column("Track", width=30)
         table.add_column("Artist", width=24)
         table.add_column("Album", width=26)
-        for index, track in enumerate(tracks, start=1):
+        for index, track in enumerate(self._visible_spotify_tracks, start=1):
             match = self._library_index.match_spotify_track(track)
             table.add_row(
                 str(index),
@@ -794,6 +868,15 @@ class SoundboiTracksApp(App[None]):
             self._render_results(self._hits)
         if self._spotify_mode == "tracks" and self._spotify_tracks:
             self._render_spotify_tracks(self._spotify_tracks)
+
+    def _toggle_spotify_local_visibility(self) -> None:
+        self._hide_local_spotify_tracks = not self._hide_local_spotify_tracks
+        self._render_spotify_tracks(self._spotify_tracks)
+
+    def _filtered_spotify_tracks(self, tracks: list[SpotifyTrack]) -> list[SpotifyTrack]:
+        if not self._hide_local_spotify_tracks:
+            return tracks
+        return [track for track in tracks if self._library_index.match_spotify_track(track).status == "none"]
 
     def _local_marker(self, label: str) -> Text | str:
         if label == "✓":

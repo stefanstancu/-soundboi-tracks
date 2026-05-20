@@ -50,7 +50,7 @@ Purchase/download flow:
 4. For Bandcamp, the app checks your collection. If you do not own the result yet, it opens the Bandcamp page for manual purchase.
 5. Close the Bandcamp browser after purchase. The app checks ownership again and downloads automatically if the purchase is detected.
 
-Downloads are consolidated under `~/Music/soundboi-tracks/downloads/` regardless of provider. Bandcamp and Beatport source metadata is tracked in a local SQLite index at `~/.config/soundboi-tracks/library-index.sqlite3` plus sidecar files next to downloaded audio.
+Downloads are consolidated under `~/Music/soundboi-tracks/downloads/` regardless of provider. Bandcamp and Beatport source metadata is tracked in a local SQLite index at `~/.config/soundboi-tracks/library-index.sqlite3`.
 
 The TUI indexes the local library in the background. Search results and Spotify playlist tracks are highlighted when they appear to already exist locally: `✓` means an exact provider/Spotify match, and `~` means a likely artist/title match. This is only an indicator; it does not prevent re-downloading.
 

@@ -101,7 +101,6 @@ class LibraryIndex:
 
     def scan(self, roots: Iterable[Path] | None = None) -> None:
         roots = tuple(roots or (library_incoming_dir(),))
-        seen = set()
         with sqlite3.connect(self.path) as conn:
             for root in roots:
                 if not root.exists():
@@ -109,15 +108,13 @@ class LibraryIndex:
                 for file_path in root.rglob("*"):
                     if not is_audio_file(file_path):
                         continue
-                    seen.add(str(file_path))
                     stat = file_path.stat()
                     row = conn.execute(
                         "SELECT size, mtime_ns FROM tracks WHERE path = ?", (str(file_path),)
                     ).fetchone()
                     if row and row[0] == stat.st_size and row[1] == stat.st_mtime_ns:
                         continue
-                    metadata = read_sidecar(file_path)
-                    self._upsert(conn, file_path, stat.st_size, stat.st_mtime_ns, metadata)
+                    self._upsert(conn, file_path, stat.st_size, stat.st_mtime_ns, {})
 
             existing = [row[0] for row in conn.execute("SELECT path FROM tracks")]
             for path in existing:
@@ -132,7 +129,6 @@ class LibraryIndex:
         origin: SearchOrigin | None = None,
     ) -> None:
         metadata = metadata_from_hit(hit, origin)
-        write_sidecar(file_path, metadata)
         stat = file_path.stat()
         with sqlite3.connect(self.path) as conn:
             self._upsert(conn, file_path, stat.st_size, stat.st_mtime_ns, metadata)
@@ -240,25 +236,6 @@ def metadata_from_hit(hit: BandcampSearchHit, origin: SearchOrigin | None = None
             "spotify_playlist_id": origin.spotify_playlist_id,
         }
     return data
-
-
-def write_sidecar(file_path: Path, metadata: dict[str, object]) -> None:
-    sidecar_path(file_path).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-
-
-def read_sidecar(file_path: Path) -> dict[str, object]:
-    path = sidecar_path(file_path)
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def sidecar_path(file_path: Path) -> Path:
-    return file_path.with_name(f"{file_path.name}.soundboi.json")
 
 
 def is_audio_file(file_path: Path) -> bool:

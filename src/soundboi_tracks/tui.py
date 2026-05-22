@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from rich.text import Text
@@ -257,6 +258,8 @@ class SoundboiTracksApp(App[None]):
         self._queue_row_by_id: dict[str, int] = {}
         self._queue_status_by_hit: dict[str, str] = {}
         self._queue_status_by_spotify_id: dict[str, str] = {}
+        self._search_row_by_queue_id: dict[str, int] = {}
+        self._spotify_row_by_track_id: dict[str, int] = {}
         self._queue_animation_timer = None
         self._queue_animation_frame = 0
         self._current_search_origin: SearchOrigin | None = None
@@ -846,8 +849,7 @@ class SoundboiTracksApp(App[None]):
                 label = f"{item.hit.artist} - {item.hit.name}" if item.hit.artist else item.hit.name
                 self.call_from_thread(self._log, f"Starting queued download {index}/{total}: {label}")
                 self._queue_store.update_status(item.queue_id, DOWNLOADING)
-                self.call_from_thread(self._render_queue)
-                self.call_from_thread(self._refresh_search_indicators)
+                self.call_from_thread(self._apply_queue_item_status, item, DOWNLOADING)
                 self.call_from_thread(self._start_queue_animation)
 
                 try:
@@ -859,19 +861,19 @@ class SoundboiTracksApp(App[None]):
                             self._log,
                             f"Bandcamp purchase required: {item.hit.artist} - {item.hit.name}",
                         )
-                        self.call_from_thread(self._refresh_queue_indicators_for_item, item)
+                        self.call_from_thread(self._apply_queue_item_status, item, NEEDS_PURCHASE)
                     else:
                         self._queue_store.update_status(item.queue_id, FAILED, str(exc)[-500:])
                         self.call_from_thread(self._log, f"Queue download failed: {exc}")
-                        self.call_from_thread(self._refresh_queue_indicators_for_item, item)
+                        self.call_from_thread(self._apply_queue_item_status, item, FAILED)
                 except BeatportDownloadError as exc:
                     self._queue_store.update_status(item.queue_id, FAILED, str(exc)[-500:])
                     self.call_from_thread(self._log, f"Queue download failed: {exc}")
-                    self.call_from_thread(self._refresh_queue_indicators_for_item, item)
+                    self.call_from_thread(self._apply_queue_item_status, item, FAILED)
                 except Exception as exc:
                     self._queue_store.update_status(item.queue_id, FAILED, str(exc)[-500:])
                     self.call_from_thread(self._log, f"Unexpected queue download error: {exc}")
-                    self.call_from_thread(self._refresh_queue_indicators_for_item, item)
+                    self.call_from_thread(self._apply_queue_item_status, item, FAILED)
                 else:
                     for file_path in files:
                         self._library_index.record_download(file_path, item.hit, origin=item.origin)
@@ -880,9 +882,7 @@ class SoundboiTracksApp(App[None]):
                         self._log,
                         f"Completed queued download: {item.hit.artist} - {item.hit.name}",
                     )
-                    self.call_from_thread(self._refresh_queue_indicators_for_item, item, True)
-                finally:
-                    self.call_from_thread(self._render_queue)
+                    self.call_from_thread(self._apply_queue_item_status, item, COMPLETED, True)
         finally:
             self.call_from_thread(self._stop_queue_animation_if_idle)
             self.call_from_thread(lambda: setattr(self.query_one("#queue-download-all", Button), "disabled", False))
@@ -1003,12 +1003,63 @@ class SoundboiTracksApp(App[None]):
             return "○"
         return ""
 
+    def _apply_queue_item_status(
+        self, item: QueueItem, status: str, force_spotify: bool = False
+    ) -> None:
+        updated_item = replace(item, status=status)
+        self._queue_items = [
+            updated_item if existing.queue_id == item.queue_id else existing
+            for existing in self._queue_items
+        ]
+        self._refresh_queue_status_cache()
+
+        row = self._queue_row_by_id.get(item.queue_id)
+        queue_table = self.query_one("#queue-table", DataTable)
+        if row is not None and row < queue_table.row_count:
+            queue_table.update_cell_at(Coordinate(row, 0), self._queue_marker(status))
+        else:
+            self._render_queue()
+
+        self._update_search_marker_for_queue_item(updated_item)
+        self._update_spotify_marker_for_queue_item(updated_item, force_spotify)
+        self._stop_queue_animation_if_idle()
+
+    def _update_search_marker_for_queue_item(self, item: QueueItem) -> None:
+        row = self._search_row_by_queue_id.get(item.queue_id)
+        if row is None:
+            return
+        table = self.query_one("#results", DataTable)
+        if row < table.row_count:
+            table.update_cell_at(Coordinate(row, 1), self._marker_for_hit(item.hit))
+
+    def _update_spotify_marker_for_queue_item(
+        self, item: QueueItem, force_spotify: bool = False
+    ) -> None:
+        spotify_track_id = item.origin.spotify_track_id if item.origin else None
+        if spotify_track_id:
+            row = self._spotify_row_by_track_id.get(spotify_track_id)
+            if row is not None:
+                table = self.query_one("#spotify-browser", DataTable)
+                if row < table.row_count:
+                    marker = self._queue_marker(item.status)
+                    if item.status == COMPLETED:
+                        marker = self._marker_for_spotify_track(self._visible_spotify_tracks[row])
+                    table.update_cell_at(Coordinate(row, 1), marker)
+                    return
+        if force_spotify or self._queue_item_affects_visible_spotify(item):
+            self._refresh_spotify_indicators()
+
     def _start_queue_animation(self) -> None:
         if self._queue_animation_timer is None:
             self._queue_animation_timer = self.set_interval(0.12, self._tick_queue_animation)
 
     def _tick_queue_animation(self) -> None:
         self._queue_animation_frame += 1
+        self._tick_queue_table_animation()
+        self._tick_search_marker_animation()
+        self._tick_spotify_marker_animation()
+
+    def _tick_queue_table_animation(self) -> None:
         table = self.query_one("#queue-table", DataTable)
         for item in self._queue_items:
             if item.status != DOWNLOADING:
@@ -1017,6 +1068,30 @@ class SoundboiTracksApp(App[None]):
             if row is None or row >= table.row_count:
                 continue
             table.update_cell_at(Coordinate(row, 0), self._queue_marker(DOWNLOADING))
+
+    def _tick_search_marker_animation(self) -> None:
+        if not self._hits:
+            return
+        table = self.query_one("#results", DataTable)
+        for queue_id, status in self._queue_status_by_hit.items():
+            if status != DOWNLOADING:
+                continue
+            row = self._search_row_by_queue_id.get(queue_id)
+            if row is None or row >= table.row_count:
+                continue
+            table.update_cell_at(Coordinate(row, 1), self._queue_marker(DOWNLOADING))
+
+    def _tick_spotify_marker_animation(self) -> None:
+        if self._spotify_mode != "tracks" or not self._visible_spotify_tracks:
+            return
+        table = self.query_one("#spotify-browser", DataTable)
+        for spotify_track_id, status in self._queue_status_by_spotify_id.items():
+            if status != DOWNLOADING:
+                continue
+            row = self._spotify_row_by_track_id.get(spotify_track_id)
+            if row is None or row >= table.row_count:
+                continue
+            table.update_cell_at(Coordinate(row, 1), self._queue_marker(DOWNLOADING))
 
     def _stop_queue_animation_if_idle(self) -> None:
         if any(item.status == DOWNLOADING for item in self._queue_items):
@@ -1027,9 +1102,11 @@ class SoundboiTracksApp(App[None]):
 
     def _render_results(self, hits: list[BandcampSearchHit]) -> None:
         self._hits = hits
+        self._search_row_by_queue_id = {}
         table = self.query_one("#results", DataTable)
         table.clear()
-        for hit in hits:
+        for row_index, hit in enumerate(hits):
+            self._search_row_by_queue_id[queue_id_for_hit(hit)] = row_index
             marker = self._marker_for_hit(hit)
             table.add_row(
                 str(hit.rank),
@@ -1075,6 +1152,7 @@ class SoundboiTracksApp(App[None]):
     def _render_spotify_tracks(self, tracks: list[SpotifyTrack]) -> None:
         self._spotify_tracks = tracks
         self._visible_spotify_tracks = self._filtered_spotify_tracks(tracks)
+        self._spotify_row_by_track_id = {}
         self._spotify_mode = "tracks"
         self._hide_spotify_loading()
         playlist_name = self._current_playlist.name if self._current_playlist else "Playlist"
@@ -1091,10 +1169,11 @@ class SoundboiTracksApp(App[None]):
         table.add_column("Track", width=30)
         table.add_column("Artist", width=24)
         table.add_column("Album", width=26)
-        for index, track in enumerate(self._visible_spotify_tracks, start=1):
+        for row_index, track in enumerate(self._visible_spotify_tracks):
+            self._spotify_row_by_track_id[track.track_id] = row_index
             marker = self._marker_for_spotify_track(track)
             table.add_row(
-                str(index),
+                str(row_index + 1),
                 marker,
                 track.name,
                 track.artist_label,

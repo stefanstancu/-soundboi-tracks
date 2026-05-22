@@ -10,6 +10,7 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.coordinate import Coordinate
 from textual.widgets import Button, DataTable, Footer, Input, LoadingIndicator, RichLog, Static
 
+from soundboi_tracks.audio.player import PreviewPlayer, PreviewPlayerError
 from soundboi_tracks.providers.bandcamp.auth import (
     BandcampAuthError,
     BandcampAuthStatus,
@@ -36,6 +37,7 @@ from soundboi_tracks.library.queue import (
     queue_id_for_hit,
 )
 from soundboi_tracks.providers.bandcamp.search import BandcampSearchHit
+from soundboi_tracks.providers.preview import PreviewError, get_preview_stream
 from soundboi_tracks.providers.beatport.search import (
     BeatportDownloadError,
     BeatportSearchError,
@@ -46,6 +48,7 @@ from soundboi_tracks.providers.search import search_all
 from soundboi_tracks.providers.spotify.auth import SpotifyAuthError, load_token, login as spotify_login
 from soundboi_tracks.providers.spotify.client import SpotifyClient, SpotifyClientError
 from soundboi_tracks.providers.spotify.models import SpotifyPlaylist, SpotifyTrack
+from soundboi_tracks.tui_widgets import PreviewScrubber
 
 
 class SoundboiTracksApp(App[None]):
@@ -194,6 +197,25 @@ class SoundboiTracksApp(App[None]):
         margin-bottom: 1;
     }
 
+    #preview-row {
+        height: auto;
+        margin-bottom: 1;
+        display: none;
+    }
+
+    #preview-title {
+        width: 2fr;
+    }
+
+    #preview-time {
+        width: 16;
+        content-align: right middle;
+    }
+
+    #preview-progress {
+        width: 3fr;
+    }
+
     #search-input {
         width: 1fr;
         margin-right: 1;
@@ -241,7 +263,7 @@ class SoundboiTracksApp(App[None]):
 
     """
 
-    BINDINGS = [("q", "quit", "Quit")]
+    BINDINGS = [("q", "quit", "Quit"), ("p", "preview_selected", "Preview")]
 
     def __init__(self) -> None:
         super().__init__()
@@ -262,6 +284,10 @@ class SoundboiTracksApp(App[None]):
         self._spotify_row_by_track_id: dict[str, int] = {}
         self._queue_animation_timer = None
         self._queue_animation_frame = 0
+        self._previewing_hit_key: str | None = None
+        self._preview_duration: float | None = None
+        self._preview_poll_timer = None
+        self._preview_player = PreviewPlayer()
         self._current_search_origin: SearchOrigin | None = None
         self._current_search_query = ""
         self._startup_complete = False
@@ -312,7 +338,12 @@ class SoundboiTracksApp(App[None]):
                             yield Input(placeholder="Search: artist track", id="search-input")
                             yield Button("Search", id="search", variant="success")
                             yield Button("Add to Queue", id="add-to-queue")
+                            yield Button("Preview", id="preview-selected")
                             yield Button("Download Selected", id="download-selected", variant="warning")
+                        with Horizontal(id="preview-row"):
+                            yield Static("", id="preview-title")
+                            yield PreviewScrubber(id="preview-progress")
+                            yield Static("0:00 / 0:00", id="preview-time")
                         with Vertical(id="search-content"):
                             yield DataTable(id="results")
                             with Vertical(id="search-loading", classes="table-loading"):
@@ -327,6 +358,9 @@ class SoundboiTracksApp(App[None]):
         self._render_all_provider_states()
         self._start_splash_spinner()
         self.run_worker(self._run_startup_checks_worker, thread=True)
+
+    def on_unmount(self) -> None:
+        self._preview_player.stop()
 
     def _run_startup_checks_worker(self) -> None:
         self.call_from_thread(
@@ -472,6 +506,8 @@ class SoundboiTracksApp(App[None]):
             self._start_search()
         elif event.button.id == "add-to-queue":
             self._add_selected_to_queue()
+        elif event.button.id == "preview-selected":
+            self._toggle_preview_selected()
         elif event.button.id == "download-selected":
             self._download_selected()
         elif event.button.id == "spotify-back":
@@ -486,6 +522,12 @@ class SoundboiTracksApp(App[None]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "search-input":
             self._start_search()
+
+    def on_preview_scrubber_seek_requested(
+        self, message: PreviewScrubber.SeekRequested
+    ) -> None:
+        self._preview_player.seek(message.seconds)
+        self._tick_preview_progress()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id != "spotify-browser":
@@ -715,6 +757,91 @@ class SoundboiTracksApp(App[None]):
             self._refresh_spotify_indicators()
         if hit.source == "bandcamp":
             self.run_worker(lambda: self._check_queued_bandcamp_ownership(item), thread=True)
+
+    def action_preview_selected(self) -> None:
+        self._toggle_preview_selected()
+
+    def _toggle_preview_selected(self) -> None:
+        hit = self._selected_hit()
+        if not hit:
+            return
+        hit_key = queue_id_for_hit(hit)
+        if self._previewing_hit_key == hit_key:
+            self._stop_preview()
+            return
+
+        self._stop_preview(log=False)
+        self._previewing_hit_key = hit_key
+        self.query_one("#preview-selected", Button).disabled = True
+        label = f"{hit.artist} - {hit.name}" if hit.artist else hit.name
+        self._log(f"Finding preview for {hit.source}: {label}")
+        self.run_worker(lambda: self._preview_worker(hit, hit_key), thread=True)
+
+    def _preview_worker(self, hit: BandcampSearchHit, hit_key: str) -> None:
+        try:
+            preview = get_preview_stream(hit)
+            self._preview_player.start(preview.url)
+        except (PreviewError, PreviewPlayerError) as exc:
+            self.call_from_thread(self._log, f"Preview unavailable: {exc}")
+            self.call_from_thread(self._reset_preview_button)
+        except Exception as exc:
+            self.call_from_thread(self._log, f"Unexpected preview error: {exc}")
+            self.call_from_thread(self._reset_preview_button)
+        else:
+            if self._previewing_hit_key != hit_key:
+                self._preview_player.stop()
+                return
+            self.call_from_thread(self._log, f"Previewing {preview.source}: {preview.title}")
+            self.call_from_thread(self.query_one("#preview-title", Static).update, preview.title)
+            self.call_from_thread(self._set_preview_playing)
+
+    def _stop_preview(self, log: bool = True) -> None:
+        self._preview_player.stop()
+        self._previewing_hit_key = None
+        self._preview_duration = None
+        self._stop_preview_polling()
+        self.query_one("#preview-progress", PreviewScrubber).reset()
+        self.query_one("#preview-row", Horizontal).display = False
+        self._reset_preview_button()
+        if log:
+            self._log("Stopped preview.")
+
+    def _reset_preview_button(self) -> None:
+        self._previewing_hit_key = None
+        button = self.query_one("#preview-selected", Button)
+        button.disabled = False
+        button.label = "Preview"
+
+    def _set_preview_playing(self) -> None:
+        button = self.query_one("#preview-selected", Button)
+        button.disabled = False
+        button.label = "Stop Preview"
+        self.query_one("#preview-row", Horizontal).display = True
+        self._preview_duration = self._preview_player.duration()
+        self._start_preview_polling()
+
+    def _start_preview_polling(self) -> None:
+        if self._preview_poll_timer is None:
+            self._preview_poll_timer = self.set_interval(0.5, self._tick_preview_progress)
+        self._tick_preview_progress()
+
+    def _stop_preview_polling(self) -> None:
+        if self._preview_poll_timer is not None:
+            self._preview_poll_timer.stop()
+            self._preview_poll_timer = None
+
+    def _tick_preview_progress(self) -> None:
+        if not self._preview_player.is_playing():
+            self._stop_preview(log=False)
+            return
+        position = self._preview_player.position() or 0
+        duration = self._preview_duration or self._preview_player.duration() or 0
+        if duration and self._preview_duration is None:
+            self._preview_duration = duration
+        self.query_one("#preview-progress", PreviewScrubber).set_progress(position, duration)
+        self.query_one("#preview-time", Static).update(
+            f"{format_time(position)} / {format_time(duration)}"
+        )
 
     def _check_queued_bandcamp_ownership(self, item: QueueItem) -> None:
         try:
@@ -1301,3 +1428,9 @@ class SoundboiTracksApp(App[None]):
 
 def run() -> None:
     SoundboiTracksApp().run()
+
+
+def format_time(seconds: float | None) -> str:
+    total = max(0, int(seconds or 0))
+    minutes, remainder = divmod(total, 60)
+    return f"{minutes}:{remainder:02d}"

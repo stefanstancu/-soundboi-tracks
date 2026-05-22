@@ -94,6 +94,14 @@ class BeatportClient:
             )
         return hits
 
+    def get_track_preview_url(self, track_id: int) -> str:
+        self.ensure_authenticated()
+        data = self._get(f"catalog/tracks/{track_id}/stream")
+        preview_url = data.get("stream_url") or data.get("url")
+        if not preview_url:
+            raise BeatportSearchError("Beatport did not return a preview stream URL")
+        return str(preview_url)
+
     def ensure_authenticated(self) -> None:
         if self.access_token and self.refresh_token and self.expires and datetime.now() < self.expires:
             return
